@@ -60,7 +60,7 @@ class PredVisc:
         # getattr protege contra instâncias antigas/incompletas mantidas em cache.
         rf = getattr(self, "rf", None)
         if rf is None:
-            return None, False
+            return None, {}
         x = np.array([[massas_lote.get(e, 0.0) for e in ENTRADAS]], dtype=float)
         y = rf.predict(x)[0]
 
@@ -132,7 +132,7 @@ class Tanque:
         self.id, self.nome, self.vol_max, self.td, self.ruido = id, nome, float(vol_max), td, ruido
         self.fluido = Fluido(rhos, {"agua": float(agua)} if agua > 0 else {})
         self.overflow = Fluido(rhos)
-        self.fora = False
+        self.fora = {}
         self.H = {k: [] for k in ["t", "vol", "dens", "sensor", "conc", "theta"]}
 
 
@@ -235,6 +235,12 @@ class Bateria:
 # =====================================================================
 up = st.sidebar.file_uploader("Planilha de dados experimentais (.xlsx)", type="xlsx")
 pred = carregar_modelo(up.getvalue() if up else None)
+VERSAO_ESTADO = 2
+if st.session_state.get("versao_estado") != VERSAO_ESTADO:
+    # Objetos Bateria/Tanque salvos por versões antigas podem ter atributos incompatíveis.
+    for _k in ("bat", "gen", "run", "csv"):
+        st.session_state.pop(_k, None)
+    st.session_state.versao_estado = VERSAO_ESTADO
 if "bat" not in st.session_state:
     st.session_state.bat, st.session_state.gen, st.session_state.run = Bateria(pred), 0, False
     st.session_state.bat.cenario()
@@ -313,18 +319,7 @@ def card(t):
         st.caption(" · ".join(f"θ{s[-3:]} {th[s]:.1f}" for s in SAIDAS)
                    + f"  |  VA {th['theta 600']/2:.1f} · VP {th['theta 600']-th['theta 300']:.1f}"
                    f" · LE {th['theta 300']-(th['theta 600']-th['theta 300']):.1f}")
-        # Compatibilidade com tanques antigos mantidos no st.session_state:
-        # versões anteriores armazenavam t.fora como bool; a versão atual usa dict.
-        fora = getattr(t, "fora", {})
-        if not isinstance(fora, dict):
-            if f.volume > 0 and getattr(bat, "pred", None) is not None:
-                _, fora = bat.pred.prever(
-                    {e: f.conc(e) * bat.v_lote for e in ENTRADAS}
-                )
-            else:
-                fora = {}
-            t.fora = fora
-
+        fora = t.fora if isinstance(t.fora, dict) else {}
         if fora:
             detalhes = " | ".join(
                 f"{e}: {v['valor']:.3f} g/lote (treino: {v['min']:.3f} a {v['max']:.3f})"
