@@ -7,7 +7,7 @@ import streamlit as st
 
 from simulador import SAIDAS, Bateria, PredVisc
 
-st.set_page_config(page_title="Simulador de Tanques", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="Simulador de Tanques", page_icon="LEF", layout="wide")
 st.markdown("""<style>
 .tq{width:56px;height:125px;border:2px solid currentColor;border-top:none;border-radius:0 0 10px 10px;position:relative;overflow:hidden}
 .tq .lv{position:absolute;bottom:0;left:0;right:0;background:#2f6fed;opacity:.65;transition:height .3s}
