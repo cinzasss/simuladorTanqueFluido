@@ -313,10 +313,22 @@ def card(t):
         st.caption(" · ".join(f"θ{s[-3:]} {th[s]:.1f}" for s in SAIDAS)
                    + f"  |  VA {th['theta 600']/2:.1f} · VP {th['theta 600']-th['theta 300']:.1f}"
                    f" · LE {th['theta 300']-(th['theta 600']-th['theta 300']):.1f}")
-        if t.fora:
+        # Compatibilidade com tanques antigos mantidos no st.session_state:
+        # versões anteriores armazenavam t.fora como bool; a versão atual usa dict.
+        fora = getattr(t, "fora", {})
+        if not isinstance(fora, dict):
+            if f.volume > 0 and getattr(bat, "pred", None) is not None:
+                _, fora = bat.pred.prever(
+                    {e: f.conc(e) * bat.v_lote for e in ENTRADAS}
+                )
+            else:
+                fora = {}
+            t.fora = fora
+
+        if fora:
             detalhes = " | ".join(
                 f"{e}: {v['valor']:.3f} g/lote (treino: {v['min']:.3f} a {v['max']:.3f})"
-                for e, v in t.fora.items()
+                for e, v in fora.items()
             )
             st.warning("Entrada(s) fora da faixa de treino do RF: " + detalhes)
     a, b, d = st.columns([2, 2, 1.2])
