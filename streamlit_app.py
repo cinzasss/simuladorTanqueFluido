@@ -61,9 +61,20 @@ class PredVisc:
         rf = getattr(self, "rf", None)
         if rf is None:
             return None, False
-        x = np.array([[massas_lote.get(e, 0.0) for e in ENTRADAS]])
+        x = np.array([[massas_lote.get(e, 0.0) for e in ENTRADAS]], dtype=float)
         y = rf.predict(x)[0]
-        fora = bool(np.any(x[0] < self.lo - 1e-9) or np.any(x[0] > self.hi + 1e-9))
+
+        # Identifica exatamente quais entradas estão fora do domínio experimental.
+        # A comparação é feita na mesma unidade do treinamento: g por lote.
+        fora = {
+            e: {
+                "valor": float(x[0, i]),
+                "min": float(self.lo[i]),
+                "max": float(self.hi[i]),
+            }
+            for i, e in enumerate(ENTRADAS)
+            if x[0, i] < self.lo[i] - 1e-9 or x[0, i] > self.hi[i] + 1e-9
+        }
         return dict(zip(SAIDAS, y)), fora
 
 
@@ -173,7 +184,7 @@ class Bateria:
         d = H["dens"][max(0, len(H["dens"]) - 1 - t.td)]
         H["sensor"].append(d * (1 + (random.random() * 2 - 1) * t.ruido / 100) if d else 0.0)
         H["conc"].append({e: f.conc(e) for e in self.rhos})
-        th, t.fora = None, False
+        th, t.fora = None, {}
         if f.volume > 0:  # g/L -> g por lote da planilha
             th, t.fora = self.pred.prever({e: f.conc(e) * self.v_lote for e in ENTRADAS})
         H["theta"].append(th)
@@ -303,7 +314,11 @@ def card(t):
                    + f"  |  VA {th['theta 600']/2:.1f} · VP {th['theta 600']-th['theta 300']:.1f}"
                    f" · LE {th['theta 300']-(th['theta 600']-th['theta 300']):.1f}")
         if t.fora:
-            st.warning("Concentração fora da faixa de treino do RF")
+            detalhes = " | ".join(
+                f"{e}: {v['valor']:.3f} g/lote (treino: {v['min']:.3f} a {v['max']:.3f})"
+                for e, v in t.fora.items()
+            )
+            st.warning("Entrada(s) fora da faixa de treino do RF: " + detalhes)
     a, b, d = st.columns([2, 2, 1.2])
     esp = a.selectbox("Espécie", list(bat.rhos), key=k("e"), label_visibility="collapsed")
     m = b.number_input("g", value=1.0, step=0.5, key=k("m"), label_visibility="collapsed")
