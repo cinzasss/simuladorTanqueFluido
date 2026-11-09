@@ -2,12 +2,19 @@ import io
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import streamlit as st
 
 from simulador import SAIDAS, Bateria, PredVisc
 
 st.set_page_config(page_title="Simulador de Tanques", page_icon="🧪", layout="wide")
+st.markdown("""<style>
+.tq{width:56px;height:125px;border:2px solid currentColor;border-top:none;border-radius:0 0 10px 10px;position:relative;overflow:hidden}
+.tq .lv{position:absolute;bottom:0;left:0;right:0;background:#2f6fed;opacity:.65}
+.tq.over{border-color:#d64545}
+.inf{font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+.mut{opacity:.6}.warn{color:#d64545}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#d64545;margin-right:6px}.dot.on{background:#2a9d57}
+</style>""", unsafe_allow_html=True)
 
 
 @st.cache_resource(show_spinner="Treinando Random Forest…")
@@ -58,33 +65,39 @@ if c[4].button("Limpar tudo"):
 st.caption(f"t = {bat.t}")
 
 
+# ---------- Visual do tanque ----------
+def tanque_html(t):
+    pct = t.fluido.volume / t.vol_max * 100
+    over = " over" if t.overflow.volume > 0 else ""
+    return f'<div class="tq{over}"><div class="lv" style="height:{min(100, pct):.1f}%"></div></div><div class="inf mut" style="text-align:center;width:56px">{pct:.0f}%</div>'
+
+
+def info_html(t):
+    f, th = t.fluido, (t.H["theta"][-1] if t.H["theta"] else None)
+    sensor = t.H["sensor"][-1] if t.H["sensor"] else 0
+    comp = "<br>".join(f"{e}: {m:.2f} g ({f.concentracao(e):.2f} g/L)" for e, m in f.massas.items() if m > 1e-9) or "vazio"
+    s = f"<b>{f.nome}</b><br><b>{f.volume:.4f} L</b> · ρ {f.densidade:.4f} g/mL<br><span class='mut'>sensor {sensor:.4f}</span><br>{comp}"
+    if th:
+        s += "<br>" + " · ".join(f"{k.replace('theta ', 'θ')}={v:.1f}" for k, v in th.items())
+        a6, a3 = th.get("theta 600"), th.get("theta 300")
+        if a6 is not None and a3 is not None:
+            s += f"<br>VA {a6/2:.1f} · VP {a6-a3:.1f} · LE {a3-(a6-a3):.1f}"
+        if t.fora:
+            s += "<br><span class='warn'>⚠ concentração fora da faixa de treino do RF</span>"
+    elif f.volume > 0:
+        s += "<br><span class='mut'>θ indisponível (sem modelo)</span>"
+    if t.overflow.volume > 0:
+        s += f"<br><span class='warn'>overflow: {t.overflow.volume:.3f} L</span>"
+    return f'<div class="inf">{s}</div>'
+
+
 # ---------- Tanques ----------
 def card(t):
     k = lambda s: f"{g}_{s}{t.id}"
-    f = t.fluido
     t.nome = st.text_input("Tanque", t.nome, key=k("n"))
-    f.nome = st.text_input("Fluido", f.nome, key=k("f"))
-    t.vol_max = st.number_input("Volume máx (L)", 0.1, value=float(t.vol_max), step=0.5, key=k("v"))
-    st.progress(min(1.0, f.volume / t.vol_max), text=f"{f.volume:.4f} L / {t.vol_max:g} L")
-    a, b = st.columns(2)
-    a.metric("Densidade (g/mL)", f"{f.densidade:.4f}")
-    b.metric("Sensor (g/mL)", f"{t.H['sensor'][-1]:.4f}" if t.H["sensor"] else "–")
-    th = t.H["theta"][-1] if t.H["theta"] else None
-    if th:
-        for col, cn in zip(st.columns(len(SAIDAS)), SAIDAS):
-            col.metric(cn.replace("theta ", "θ"), f"{th[cn]:.1f}")
-        a6, a3 = th.get("theta 600"), th.get("theta 300")
-        if a6 is not None and a3 is not None:
-            st.caption(f"VA {a6/2:.1f} · VP {a6-a3:.1f} · LE {a3-(a6-a3):.1f}")
-        if t.fora:
-            st.warning("Concentração fora da faixa de treino do RF")
-    elif f.volume > 0:
-        st.caption("θ indisponível (sem modelo)")
-    comp = {e: {"Massa (g)": m, "Conc. (g/L)": f.concentracao(e)} for e, m in f.massas.items() if m > 1e-9}
-    if comp:
-        st.dataframe(pd.DataFrame(comp).T.round(3), use_container_width=True)
-    if t.overflow.volume > 0:
-        st.error(f"Overflow acumulado: {t.overflow.volume:.3f} L")
+    tl, tr = st.columns([1, 3])
+    tl.markdown(tanque_html(t), unsafe_allow_html=True)
+    tr.markdown(info_html(t), unsafe_allow_html=True)
     with st.expander("Operações"):
         esp = st.selectbox("Espécie", list(bat.rhos), key=k("e"))
         m = st.number_input("Massa (g)", value=1.0, step=0.5, key=k("m"))
@@ -96,12 +109,14 @@ def card(t):
         if st.button("Transferir", key=k("tr")):
             bat.transferir(t.id, dest, vol)
             st.rerun()
-    with st.expander("Sensor de densidade"):
-        t.td = int(st.number_input("Atraso (passos)", 0, value=t.td, key=k("sd")))
-        t.ruido = st.number_input("Ruído (%)", 0.0, value=t.ruido * 100, step=0.5, key=k("sr")) / 100
-    if st.button("Remover tanque", key=k("rm")):
-        bat.remover_tanque(t.id)
-        st.rerun()
+    with st.expander("Configurações"):
+        t.fluido.nome = st.text_input("Nome do fluido", t.fluido.nome, key=k("f"))
+        t.vol_max = st.number_input("Volume máx (L)", 0.1, value=float(t.vol_max), step=0.5, key=k("v"))
+        t.td = int(st.number_input("Sensor: atraso (passos)", 0, value=t.td, key=k("sd")))
+        t.ruido = st.number_input("Sensor: ruído (%)", 0.0, value=t.ruido * 100, step=0.5, key=k("sr")) / 100
+        if st.button("Remover tanque", key=k("rm")):
+            bat.remover_tanque(t.id)
+            st.rerun()
 
 
 st.subheader("Tanques")
@@ -123,13 +138,13 @@ st.subheader("Válvulas")
 for v in list(bat.valvulas.values()):
     c = st.columns([3, 3, 1.5, 1.2, 0.8])
     v.nome = c[0].text_input("Nome", v.nome, key=f"{g}_vn{v.id}", label_visibility="collapsed")
-    c[1].write(f"{nm(v.origem)} → {nm(v.destino)}")
+    c[1].markdown(f'<span class="dot{" on" if v.aberta else ""}"></span>{nm(v.origem)} → {nm(v.destino)}', unsafe_allow_html=True)
     v.vazao = c[2].number_input("L/passo", 0.0, value=float(v.vazao), step=0.05, key=f"{g}_vq{v.id}", label_visibility="collapsed")
     v.aberta = c[3].toggle("Aberta", v.aberta, key=f"{g}_va{v.id}")
     if c[4].button("✕", key=f"{g}_vx{v.id}"):
         del bat.valvulas[v.id]
         st.rerun()
-if len(bat.tanques) >= 1:
+if bat.tanques:
     with st.expander("➕ Nova válvula"), st.form("nova_valvula", clear_on_submit=True):
         g1, g2, g3, g4 = st.columns(4)
         vn = g1.text_input("Nome da válvula")
