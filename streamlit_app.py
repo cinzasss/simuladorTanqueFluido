@@ -1,4 +1,5 @@
 import io
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,7 +10,7 @@ from simulador import SAIDAS, Bateria, PredVisc
 st.set_page_config(page_title="Simulador de Tanques", page_icon="🧪", layout="wide")
 st.markdown("""<style>
 .tq{width:56px;height:125px;border:2px solid currentColor;border-top:none;border-radius:0 0 10px 10px;position:relative;overflow:hidden}
-.tq .lv{position:absolute;bottom:0;left:0;right:0;background:#2f6fed;opacity:.65}
+.tq .lv{position:absolute;bottom:0;left:0;right:0;background:#2f6fed;opacity:.65;transition:height .3s}
 .tq.over{border-color:#d64545}
 .inf{font-size:13px;line-height:1.45;overflow-wrap:anywhere}
 .mut{opacity:.6}.warn{color:#d64545}
@@ -28,6 +29,7 @@ pred = carregar_modelo(up.getvalue() if up else None)
 if "bat" not in st.session_state:
     st.session_state.bat, st.session_state.gen = Bateria(pred), 0
     st.session_state.bat.cenario()
+    st.session_state.rodando, st.session_state.ult = False, 0.0
 bat, g = st.session_state.bat, st.session_state.gen
 bat.pred = pred
 st.sidebar.caption(pred.msg)
@@ -36,6 +38,7 @@ nm = lambda i: "dreno" if i is None else bat.tanques[i].nome
 
 def recarregar(cenario):
     st.session_state.gen += 1  # novas chaves de widgets, evita valores antigos
+    st.session_state.rodando = False
     bat.cenario() if cenario else bat.limpar()
     st.rerun()
 
@@ -52,17 +55,21 @@ with st.sidebar.form("nova_esp", clear_on_submit=True):
 
 # ---------- Controle de tempo ----------
 st.title("🧪 Simulador de tanques")
-c = st.columns([1.2, 1, 1, 1.4, 1])
+rodando = st.session_state.rodando
+c = st.columns([1, 1, 1, 1.2, 1.2, 1.3, 1])
 n = c[0].number_input("Passos", 1, 1000, 10)
-if c[1].button("▶ Rodar n passos"):
+if c[1].button("Rodar n passos"):
     bat.passo(int(n))
 if c[2].button("⏭ 1 passo"):
     bat.passo(1)
-if c[3].button("Cenário T1→T2→T3"):
+if c[3].button("⏸ Pausar" if rodando else "▶ Play", type="primary"):
+    st.session_state.rodando, st.session_state.ult = not rodando, 0.0
+    st.rerun()
+intervalo = c[4].number_input("Intervalo (s)", 0.3, 10.0, 1.0, 0.1, key="intervalo")
+if c[5].button("Cenário T1→T2→T3"):
     recarregar(True)
-if c[4].button("Limpar tudo"):
+if c[6].button("Limpar"):
     recarregar(False)
-st.caption(f"t = {bat.t}")
 
 
 # ---------- Visual do tanque ----------
@@ -91,7 +98,6 @@ def info_html(t):
     return f'<div class="inf">{s}</div>'
 
 
-# ---------- Tanques ----------
 def card(t):
     k = lambda s: f"{g}_{s}{t.id}"
     t.nome = st.text_input("Tanque", t.nome, key=k("n"))
@@ -119,63 +125,77 @@ def card(t):
             st.rerun()
 
 
-st.subheader("Tanques")
-tanques = list(bat.tanques.values())
-for i in range(0, len(tanques), 3):
-    for col, t in zip(st.columns(3), tanques[i:i + 3]):
-        with col, st.container(border=True):
-            card(t)
-with st.expander("➕ Novo tanque"), st.form("novo_tanque", clear_on_submit=True):
-    f1, f2, f3, f4 = st.columns(4)
-    nn, nf = f1.text_input("Nome do tanque"), f2.text_input("Nome do fluido")
-    nv, na = f3.number_input("Volume máx (L)", 0.1, value=5.0), f4.number_input("Água inicial (g)", 0.0, value=0.0)
-    if st.form_submit_button("Criar"):
-        bat.criar_tanque(nn or f"Tanque {bat._id}", nv, na, nf or "Fluido")
-        st.rerun()
+# ---------- Painel: atualiza sozinho enquanto estiver em Play ----------
+def painel():
+    ss = st.session_state
+    if ss.rodando and time.time() - ss.ult >= 0.9 * intervalo:  # só avança no ritmo do timer
+        bat.passo(1)
+        ss.ult = time.time()
+    st.caption(f"t = {bat.t}" + ("  ·  ▶ rodando" if ss.rodando else ""))
 
-# ---------- Válvulas ----------
-st.subheader("Válvulas")
-for v in list(bat.valvulas.values()):
-    c = st.columns([3, 3, 1.5, 1.2, 0.8])
-    v.nome = c[0].text_input("Nome", v.nome, key=f"{g}_vn{v.id}", label_visibility="collapsed")
-    c[1].markdown(f'<span class="dot{" on" if v.aberta else ""}"></span>{nm(v.origem)} → {nm(v.destino)}', unsafe_allow_html=True)
-    v.vazao = c[2].number_input("L/passo", 0.0, value=float(v.vazao), step=0.05, key=f"{g}_vq{v.id}", label_visibility="collapsed")
-    v.aberta = c[3].toggle("Aberta", v.aberta, key=f"{g}_va{v.id}")
-    if c[4].button("✕", key=f"{g}_vx{v.id}"):
-        del bat.valvulas[v.id]
-        st.rerun()
-if bat.tanques:
-    with st.expander("➕ Nova válvula"), st.form("nova_valvula", clear_on_submit=True):
-        g1, g2, g3, g4 = st.columns(4)
-        vn = g1.text_input("Nome da válvula")
-        vo = g2.selectbox("Origem", list(bat.tanques), format_func=nm)
-        vd = g3.selectbox("Destino", [None] + list(bat.tanques), format_func=nm)
-        vq = g4.number_input("Vazão (L/passo)", 0.0, value=0.2, step=0.05)
-        if st.form_submit_button("Criar") and vo != vd:
-            bat.criar_valvula(vn or f"{nm(vo)} → {nm(vd)}", vo, vd, vq)
+    st.subheader("Tanques")
+    tanques = list(bat.tanques.values())
+    for i in range(0, len(tanques), 3):
+        for col, t in zip(st.columns(3), tanques[i:i + 3]):
+            with col, st.container(border=True):
+                card(t)
+    with st.expander("➕ Novo tanque"), st.form("novo_tanque", clear_on_submit=True):
+        f1, f2, f3, f4 = st.columns(4)
+        nn, nf = f1.text_input("Nome do tanque"), f2.text_input("Nome do fluido")
+        nv, na = f3.number_input("Volume máx (L)", 0.1, value=5.0), f4.number_input("Água inicial (g)", 0.0, value=0.0)
+        if st.form_submit_button("Criar"):
+            bat.criar_tanque(nn or f"Tanque {bat._id}", nv, na, nf or "Fluido")
             st.rerun()
 
-# ---------- Gráficos ----------
-st.subheader("Gráficos")
-ops = ["Volume (L)", "Densidade real + sensor (g/mL)"] + SAIDAS + [f"Conc. {e} (g/L)" for e in bat.rhos]
-met = st.selectbox("Variável", ops)
-if tanques:
-    fig, ax = plt.subplots(figsize=(10, 4))
-    for i, t in enumerate(tanques):
-        H, x, cor = t.H, t.H["t"], f"C{i}"
-        if met == "Volume (L)":
-            ax.step(x, H["vol"], where="post", label=t.nome, color=cor)
-        elif met.startswith("Densidade"):
-            ax.step(x, H["dens"], where="post", label=f"{t.nome} real", color=cor)
-            ax.step(x, H["sensor"], where="post", label=f"{t.nome} sensor", color=cor, ls="--", alpha=0.6)
-        elif met in SAIDAS:
-            ax.step(x, [h[met] if h else np.nan for h in H["theta"]], where="post", label=t.nome, color=cor)
-        else:
-            e = met[6:-6]
-            ax.step(x, [cc.get(e, 0.0) for cc in H["conc"]], where="post", label=t.nome, color=cor)
-    ax.set_xlabel("tempo (passos)"); ax.set_ylabel(met); ax.grid(True); ax.legend()
-    st.pyplot(fig)
-    plt.close(fig)
+    st.subheader("Válvulas")
+    for v in list(bat.valvulas.values()):
+        c = st.columns([3, 3, 1.5, 1.2, 0.8])
+        v.nome = c[0].text_input("Nome", v.nome, key=f"{g}_vn{v.id}", label_visibility="collapsed")
+        c[1].markdown(f'<span class="dot{" on" if v.aberta else ""}"></span>{nm(v.origem)} → {nm(v.destino)}', unsafe_allow_html=True)
+        v.vazao = c[2].number_input("L/passo", 0.0, value=float(v.vazao), step=0.05, key=f"{g}_vq{v.id}", label_visibility="collapsed")
+        v.aberta = c[3].toggle("Aberta", v.aberta, key=f"{g}_va{v.id}")
+        if c[4].button("✕", key=f"{g}_vx{v.id}"):
+            del bat.valvulas[v.id]
+            st.rerun()
+    if bat.tanques:
+        with st.expander("➕ Nova válvula"), st.form("nova_valvula", clear_on_submit=True):
+            g1, g2, g3, g4 = st.columns(4)
+            vn = g1.text_input("Nome da válvula")
+            vo = g2.selectbox("Origem", list(bat.tanques), format_func=nm)
+            vd = g3.selectbox("Destino", [None] + list(bat.tanques), format_func=nm)
+            vq = g4.number_input("Vazão (L/passo)", 0.0, value=0.2, step=0.05)
+            if st.form_submit_button("Criar") and vo != vd:
+                bat.criar_valvula(vn or f"{nm(vo)} → {nm(vd)}", vo, vd, vq)
+                st.rerun()
+
+    st.subheader("Gráficos")
+    ops = ["Volume (L)", "Densidade real + sensor (g/mL)"] + SAIDAS + [f"Conc. {e} (g/L)" for e in bat.rhos]
+    met = st.selectbox("Variável", ops)
+    if tanques:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for i, t in enumerate(tanques):
+            H, x, cor = t.H, t.H["t"], f"C{i}"
+            if met == "Volume (L)":
+                ax.step(x, H["vol"], where="post", label=t.nome, color=cor)
+            elif met.startswith("Densidade"):
+                ax.step(x, H["dens"], where="post", label=f"{t.nome} real", color=cor)
+                ax.step(x, H["sensor"], where="post", label=f"{t.nome} sensor", color=cor, ls="--", alpha=0.6)
+            elif met in SAIDAS:
+                ax.step(x, [h[met] if h else np.nan for h in H["theta"]], where="post", label=t.nome, color=cor)
+            else:
+                e = met[6:-6]
+                ax.step(x, [cc.get(e, 0.0) for cc in H["conc"]], where="post", label=t.nome, color=cor)
+        ax.set_xlabel("tempo (passos)"); ax.set_ylabel(met); ax.grid(True); ax.legend()
+        st.pyplot(fig)
+        plt.close(fig)
+
+    with st.expander("Registro de operações"):
+        st.text("\n".join(reversed(bat.log)))
+    st.download_button("⬇ Baixar CSV", bat.csv(), "simulacao.csv", "text/csv")
+
+
+# run_every é definido na criação do fragmento: Play liga o timer, Pausar desliga
+st.fragment(run_every=intervalo if rodando else None)(painel)()
 
 with st.expander("Registro de operações"):
     st.text("\n".join(reversed(bat.log)))
