@@ -57,16 +57,20 @@ class PredVisc:
 
     def prever(self, massas_lote):
         """massas_lote: dict {CMC, Barita, Sal} em g/lote. Retorna (dict theta, fora_da_faixa)."""
-        if self.rf is None:
+        # getattr protege contra instâncias antigas/incompletas mantidas em cache.
+        rf = getattr(self, "rf", None)
+        if rf is None:
             return None, False
         x = np.array([[massas_lote.get(e, 0.0) for e in ENTRADAS]])
-        y = self.rf.predict(x)[0]
+        y = rf.predict(x)[0]
         fora = bool(np.any(x[0] < self.lo - 1e-9) or np.any(x[0] > self.hi + 1e-9))
         return dict(zip(SAIDAS, y)), fora
 
 
 @st.cache_resource(show_spinner="Treinando Random Forest…")
-def carregar_modelo(dados):
+def carregar_modelo(dados, versao_cache="modelo-v2-2026-11-09"):
+    # A versão faz parte da chave do cache: força a criação de uma instância
+    # nova quando esta implementação do modelo for publicada.
     return PredVisc(io.BytesIO(dados) if dados else None)
 
 
@@ -365,8 +369,12 @@ def painel():
 
     # ---------- Gráficos ----------
     st.subheader("Gráficos")
-    ops = ["Volume (L)", "Densidade real + sensor (g/mL)"] + (SAIDAS if pred.rf is not None else []) \
-          + [f"Conc. {e} (g/L)" for e in bat.rhos]
+    tem_modelo_rf = getattr(pred, "rf", None) is not None
+    ops = (
+        ["Volume (L)", "Densidade real + sensor (g/mL)"]
+        + (SAIDAS if tem_modelo_rf else [])
+        + [f"Conc. {e} (g/L)" for e in bat.rhos]
+    )
     met = st.selectbox("Variável (eixo x = tempo global, passos)", ops)
     if tanques:
         fig, ax = plt.subplots(figsize=(10, 3.8))
