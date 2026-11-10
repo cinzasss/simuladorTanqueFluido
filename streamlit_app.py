@@ -14,7 +14,7 @@ from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 
-st.set_page_config(page_title="Simulador de Tanques", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="Simulador de Tanques", layout="wide")
 
 SAIDAS = ["theta 600", "theta 300", "theta 200", "theta 100", "theta 6", "theta 3"]
 SAIDAS_OBRIG = SAIDAS[:4]  # theta 6 e theta 3 só entram se existirem na planilha
