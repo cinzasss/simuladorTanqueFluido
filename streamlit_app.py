@@ -329,7 +329,7 @@ def recarregar(cenario):
 # =====================================================================
 # Barra superior
 # =====================================================================
-st.title("🧪 Simulador de tanques")
+st.title("Simulador de tanques")
 c = st.columns([1, 1, 2, 2, 1.4, 1])
 if c[0].button("Passo ⏭"):
     bat.passo(1)
