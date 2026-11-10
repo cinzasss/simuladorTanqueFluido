@@ -10,13 +10,16 @@ import streamlit as st
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, RBF, WhiteKernel
-from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 
-st.set_page_config(page_title="Simulador de Tanques", layout="wide")
+st.set_page_config(page_title="Simulador de Tanques", page_icon="🧪", layout="wide")
 
 SAIDAS = ["theta 600", "theta 300", "theta 200", "theta 100", "theta 6", "theta 3"]
 SAIDAS_OBRIG = SAIDAS[:4]  # theta 6 e theta 3 só entram se existirem na planilha
-MODELOS = {"Random Forest": "rf", "Suave (Processo Gaussiano)": "gp"}
+MODELOS = {"Random Forest": "rf", "Suave (Processo Gaussiano)": "gp",
+           "Polinomial grau 2 (extrapola)": "poly"}
 ENTRADAS = ["CMC", "Barita", "Sal"]
 ARQ_PADRAO = "Dados_experimentais.xlsx"
 
@@ -75,6 +78,9 @@ class PredVisc:
             self.rf = GaussianProcessRegressor(ker, normalize_y=True, n_restarts_optimizer=3, random_state=0)
             self.rf.fit(self.escala.transform(X.values), Y.values)
             rotulo = "Processo Gaussiano"
+        elif self.tipo == "poly":
+            self.rf = make_pipeline(StandardScaler(), PolynomialFeatures(2), Ridge(alpha=0.1)).fit(X.values, Y.values)
+            rotulo = "Polinomial grau 2"
         else:
             self.rf = RandomForestRegressor(n_estimators=150, random_state=0).fit(X.values, Y.values)
             rotulo = "RF"
@@ -107,7 +113,7 @@ class PredVisc:
 
 
 @st.cache_resource(show_spinner="Treinando Random Forest…")
-def carregar_modelo(dados, tipo="rf", versao_cache="modelo-v3-2026-11-09"):
+def carregar_modelo(dados, tipo="rf", versao_cache="modelo-v4-2026-11-09"):
     # A versão faz parte da chave do cache: força a criação de uma instância
     # nova quando esta implementação do modelo for publicada.
     return PredVisc(io.BytesIO(dados) if dados else None, tipo)
@@ -161,7 +167,7 @@ class Tanque:
         self.fluido = Fluido(rhos, {"agua": float(agua)} if agua > 0 else {})
         self.overflow = Fluido(rhos)
         self.fora = {}
-        self.H = {k: [] for k in ["t", "vol", "dens", "sensor", "conc", "theta"]}
+        self.H = {k: [] for k in ["t", "vol", "dens", "sensor", "conc", "theta", "extra"]}
 
 
 class Valvula:
@@ -207,7 +213,7 @@ class Bateria:
     def limpar_graficos(self):
         """Zera o histórico de todos os tanques e recomeça o gráfico do estado atual."""
         for t in self.tanques.values():
-            t.H = {k: [] for k in ["t", "vol", "dens", "sensor", "conc", "theta"]}
+            t.H = {k: [] for k in ["t", "vol", "dens", "sensor", "conc", "theta", "extra"]}
             self._reg(t)
 
     def _reg(self, t):
@@ -222,6 +228,7 @@ class Bateria:
         if f.volume > 0:  # g/L -> g por lote da planilha
             th, t.fora = self.pred.prever({e: f.conc(e) * self.v_lote for e in ENTRADAS})
         H["theta"].append(th)
+        H["extra"].append(bool(t.fora))
 
     def passo(self, n=1):
         for _ in range(n):
@@ -270,10 +277,11 @@ class Bateria:
 up = st.sidebar.file_uploader("Planilha de dados experimentais (.xlsx)", type="xlsx")
 tipo_modelo = MODELOS[st.sidebar.selectbox(
     "Modelo dos θ", list(MODELOS),
-    help="O Random Forest responde em degraus (a saída só muda ao cruzar um corte aprendido). "
-         "O Processo Gaussiano varia de forma contínua com a concentração.")]
+    help="Random Forest: responde em degraus e, fora da faixa de treino, repete o valor da borda. "
+         "Processo Gaussiano: contínuo; fora da faixa o comportamento depende dos dados. "
+         "Polinomial: contínuo e continua variando fora da faixa (extrapola).")]
 pred = carregar_modelo(up.getvalue() if up else None, tipo_modelo)
-VERSAO_ESTADO = 3
+VERSAO_ESTADO = 4
 if st.session_state.get("versao_estado") != VERSAO_ESTADO:
     # Objetos Bateria/Tanque salvos por versões antigas podem ter atributos incompatíveis.
     for _k in ("bat", "gen", "run", "csv"):
@@ -363,7 +371,10 @@ def card(t):
                 f"{e}: {v['valor']:.3f} g/lote (treino: {v['min']:.3f} a {v['max']:.3f})"
                 for e, v in fora.items()
             )
-            st.warning("Entrada(s) fora da faixa de treino do RF: " + detalhes)
+            dica = (" O Random Forest repete o valor da borda fora da faixa; "
+                    "o modelo Polinomial na barra lateral extrapola." if pred.tipo == "rf" else "")
+            st.warning("⚠️ Extrapolando: a previsão foi feita, mas há entrada(s) fora da faixa de treino. "
+                       + detalhes + "." + dica)
     a, b, d = st.columns([2, 2, 1.2])
     esp = a.selectbox("Espécie", list(bat.rhos), key=k("e"), label_visibility="collapsed")
     m = b.number_input("g", value=1.0, step=0.5, key=k("m"), label_visibility="collapsed")
@@ -451,7 +462,12 @@ def painel():
                 ax.step(x, H["dens"], where="post", label=f"{t.nome} real", color=cor)
                 ax.step(x, H["sensor"], where="post", label=f"{t.nome} sensor", color=cor, ls="--", alpha=0.6)
             elif met in SAIDAS:
-                ax.step(x, [h[met] if h else np.nan for h in H["theta"]], where="post", label=t.nome, color=cor)
+                y = [h[met] if h else np.nan for h in H["theta"]]
+                ax.step(x, y, where="post", label=t.nome, color=cor)
+                ex = [j for j, e in enumerate(H["extra"]) if e and j < len(y)]
+                if ex:
+                    ax.scatter([x[j] for j in ex], [y[j] for j in ex], marker="x", color=cor, zorder=3,
+                               label=f"{t.nome} (extrapolando)")
             else:
                 e = met[6:-6]
                 ax.step(x, [cc.get(e, 0.0) for cc in H["conc"]], where="post", label=t.nome, color=cor)
