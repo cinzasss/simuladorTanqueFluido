@@ -18,8 +18,8 @@ st.set_page_config(page_title="Simulador de Tanques", page_icon="🧪", layout="
 
 SAIDAS = ["theta 600", "theta 300", "theta 200", "theta 100", "theta 6", "theta 3"]
 SAIDAS_OBRIG = SAIDAS[:4]  # theta 6 e theta 3 só entram se existirem na planilha
-MODELOS = {"Random Forest": "rf", "Suave (Processo Gaussiano)": "gp",
-           "Polinomial grau 2 (extrapola)": "poly"}
+MODELOS = {"Linear (extrapola)": "lin", "Polinomial grau 2 (extrapola)": "poly",
+           "Random Forest": "rf", "Suave (Processo Gaussiano)": "gp"}
 ENTRADAS = ["CMC", "Barita", "Sal"]
 ARQ_PADRAO = "Dados_experimentais.xlsx"
 
@@ -32,7 +32,7 @@ class PredVisc:
 
     def __init__(self, fonte=None, tipo="rf"):
         self.rf, self.msg, self.lo, self.hi = None, "Sem planilha: θ indisponível", None, None
-        self.tipo, self.saidas, self.escala = tipo, list(SAIDAS_OBRIG), None
+        self.tipo, self.saidas, self.escala, self.diag = tipo, list(SAIDAS_OBRIG), None, None
         if fonte is None and os.path.exists(ARQ_PADRAO):
             fonte = ARQ_PADRAO
         if fonte is None:
@@ -72,12 +72,25 @@ class PredVisc:
         ok = X.notna().all(axis=1) & Y.notna().all(axis=1)
         X, Y = X[ok], Y[ok]
         self.saidas = list(sai)
+        self.diag = {
+            "entradas": pd.DataFrame({
+                "coluna usada": [str(ent[e]) if ent[e] else "(não achei: usando 0)" for e in ENTRADAS],
+                "mín (g/lote)": X.min().values, "máx (g/lote)": X.max().values,
+                "valores distintos": X.nunique().values}, index=ENTRADAS),
+            "saidas": pd.DataFrame({
+                "coluna usada": [str(c) for c in sai.values()],
+                "mín": Y.min().values, "máx": Y.max().values,
+                "valores distintos": Y.nunique().values}, index=list(sai)),
+            "n": len(X)}
         if self.tipo == "gp":
             self.escala = StandardScaler().fit(X.values)
             ker = ConstantKernel(1.0) * RBF([1.0] * X.shape[1], (1e-2, 1e2)) + WhiteKernel(1e-3, (1e-8, 1e-1))
             self.rf = GaussianProcessRegressor(ker, normalize_y=True, n_restarts_optimizer=3, random_state=0)
             self.rf.fit(self.escala.transform(X.values), Y.values)
             rotulo = "Processo Gaussiano"
+        elif self.tipo == "lin":
+            self.rf = make_pipeline(StandardScaler(), Ridge(alpha=0.1)).fit(X.values, Y.values)
+            rotulo = "Linear"
         elif self.tipo == "poly":
             self.rf = make_pipeline(StandardScaler(), PolynomialFeatures(2), Ridge(alpha=0.1)).fit(X.values, Y.values)
             rotulo = "Polinomial grau 2"
@@ -113,7 +126,7 @@ class PredVisc:
 
 
 @st.cache_resource(show_spinner="Treinando Random Forest…")
-def carregar_modelo(dados, tipo="rf", versao_cache="modelo-v4-2026-11-09"):
+def carregar_modelo(dados, tipo="rf", versao_cache="modelo-v5-2026-11-09"):
     # A versão faz parte da chave do cache: força a criação de uma instância
     # nova quando esta implementação do modelo for publicada.
     return PredVisc(io.BytesIO(dados) if dados else None, tipo)
@@ -177,7 +190,7 @@ class Valvula:
 
 class Bateria:
     def __init__(self, pred):
-        self.pred, self.v_lote = pred, 0.35
+        self.pred, self.agua_lote = pred, 1000.0
         self.rhos = {"agua": 1.0, "CMC": 1.6, "Barita": 4.2, "Sal": 2.16}
         self.limpar()
 
@@ -225,8 +238,9 @@ class Bateria:
         H["sensor"].append(d * (1 + (random.random() * 2 - 1) * t.ruido / 100) if d else 0.0)
         H["conc"].append({e: f.conc(e) for e in self.rhos})
         th, t.fora = None, {}
-        if f.volume > 0:  # g/L -> g por lote da planilha
-            th, t.fora = self.pred.prever({e: f.conc(e) * self.v_lote for e in ENTRADAS})
+        agua = f.m.get("agua", 0.0)
+        if agua > 1e-6:  # massa de cada espécie por lote da planilha (= agua_lote g de água)
+            th, t.fora = self.pred.prever({e: f.m.get(e, 0.0) / agua * self.agua_lote for e in ENTRADAS})
         H["theta"].append(th)
         H["extra"].append(bool(t.fora))
 
@@ -277,11 +291,11 @@ class Bateria:
 up = st.sidebar.file_uploader("Planilha de dados experimentais (.xlsx)", type="xlsx")
 tipo_modelo = MODELOS[st.sidebar.selectbox(
     "Modelo dos θ", list(MODELOS),
-    help="Random Forest: responde em degraus e, fora da faixa de treino, repete o valor da borda. "
-         "Processo Gaussiano: contínuo; fora da faixa o comportamento depende dos dados. "
-         "Polinomial: contínuo e continua variando fora da faixa (extrapola).")]
+    help="Linear e Polinomial: contínuos e continuam variando fora da faixa (extrapolam). "
+         "Random Forest: responde em degraus (a planilha tem só 3 níveis por variável) e repete o valor "
+         "da borda fora da faixa. Processo Gaussiano: contínuo, mas foi o pior na validação com a planilha.")]
 pred = carregar_modelo(up.getvalue() if up else None, tipo_modelo)
-VERSAO_ESTADO = 4
+VERSAO_ESTADO = 5
 if st.session_state.get("versao_estado") != VERSAO_ESTADO:
     # Objetos Bateria/Tanque salvos por versões antigas podem ter atributos incompatíveis.
     for _k in ("bat", "gen", "run", "csv"):
@@ -294,9 +308,15 @@ if "bat" not in st.session_state:
 bat, g = st.session_state.bat, st.session_state.gen
 bat.pred = pred
 st.sidebar.caption(pred.msg)
-bat.v_lote = st.sidebar.number_input(
-    "Volume do lote da planilha (L)", 0.01, value=float(bat.v_lote), step=0.05,
-    help="Converte a concentração do tanque (g/L) em gramas por lote, que é a unidade da planilha usada no RF.")
+if pred.diag:
+    with st.sidebar.expander("🔎 Diagnóstico do modelo"):
+        st.caption(f"{pred.diag['n']} experimentos. Entradas do modelo = massa de cada espécie por lote de água da planilha.")
+        st.dataframe(pred.diag["entradas"], use_container_width=True)
+        st.dataframe(pred.diag["saidas"], use_container_width=True)
+bat.agua_lote = st.sidebar.number_input(
+    "Água por lote da planilha (g)", 1.0, value=float(bat.agua_lote), step=50.0,
+    help="As massas da planilha (CMC, Barita, Sal) são por lote. Pela densidade das linhas, o lote tem ~1000 mL "
+         "de água. O app converte cada tanque para essa base: massa da espécie ÷ massa de água × este valor.")
 nm = lambda i: "dreno" if i is None else bat.tanques[i].nome
 
 
@@ -372,9 +392,12 @@ def card(t):
                 for e, v in fora.items()
             )
             dica = (" O Random Forest repete o valor da borda fora da faixa; "
-                    "o modelo Polinomial na barra lateral extrapola." if pred.tipo == "rf" else "")
+                    "os modelos Linear e Polinomial (barra lateral) extrapolam." if pred.tipo == "rf" else "")
             st.warning("⚠️ Extrapolando: a previsão foi feita, mas há entrada(s) fora da faixa de treino. "
-                       + detalhes + "." + dica)
+                       + detalhes + f" (g por lote de {bat.agua_lote:g} g de água = massa da espécie ÷ massa de água do tanque × {bat.agua_lote:g})."
+                       + dica)
+    elif f.volume > 0 and getattr(pred, "rf", None) is not None:
+        st.caption("θ indisponível: tanque sem água (a planilha define a composição por massa de água do lote).")
     a, b, d = st.columns([2, 2, 1.2])
     esp = a.selectbox("Espécie", list(bat.rhos), key=k("e"), label_visibility="collapsed")
     m = b.number_input("g", value=1.0, step=0.5, key=k("m"), label_visibility="collapsed")
