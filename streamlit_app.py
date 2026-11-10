@@ -1,16 +1,22 @@
 import io
 import os
 import random
+import re
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import ConstantKernel, RBF, WhiteKernel
+from sklearn.preprocessing import StandardScaler
 
-st.set_page_config(page_title="Simulador de Tanques", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="Simulador de Tanques", layout="wide")
 
-SAIDAS = ["theta 600", "theta 300", "theta 200", "theta 100"]
+SAIDAS = ["theta 600", "theta 300", "theta 200", "theta 100", "theta 6", "theta 3"]
+SAIDAS_OBRIG = SAIDAS[:4]  # theta 6 e theta 3 só entram se existirem na planilha
+MODELOS = {"Random Forest": "rf", "Suave (Processo Gaussiano)": "gp"}
 ENTRADAS = ["CMC", "Barita", "Sal"]
 ARQ_PADRAO = "Dados_experimentais.xlsx"
 
@@ -21,8 +27,9 @@ ARQ_PADRAO = "Dados_experimentais.xlsx"
 class PredVisc:
     """Treina um RF: massas do lote (CMC, Barita, Sal em g) -> theta 600/300/200/100."""
 
-    def __init__(self, fonte=None):
+    def __init__(self, fonte=None, tipo="rf"):
         self.rf, self.msg, self.lo, self.hi = None, "Sem planilha: θ indisponível", None, None
+        self.tipo, self.saidas, self.escala = tipo, list(SAIDAS_OBRIG), None
         if fonte is None and os.path.exists(ARQ_PADRAO):
             fonte = ARQ_PADRAO
         if fonte is None:
@@ -39,21 +46,41 @@ class PredVisc:
                 return c
         return None
 
+    @staticmethod
+    def _achar_theta(cols, num):
+        """Coluna cujo primeiro número é exatamente `num` (evita '6' casar com '600')."""
+        for c in cols:
+            m = re.search(r"\d+", str(c))
+            if m and m.group() == num:
+                return c
+        return None
+
     def _treinar(self, fonte):
         for nome, df in pd.read_excel(fonte, sheet_name=None).items():
             ent = {e: self._achar(df.columns, e) for e in ENTRADAS}
-            sai = {s: self._achar(df.columns, s[-3:]) for s in SAIDAS}
-            if ent["CMC"] and ent["Barita"] and all(sai.values()):
+            sai = {s: self._achar_theta(df.columns, s.split()[-1]) for s in SAIDAS}
+            if ent["CMC"] and ent["Barita"] and all(sai[s] for s in SAIDAS_OBRIG):
                 break
         else:
             raise ValueError("não achei colunas CMC, Barita e leituras 600/300/200/100")
+        sai = {s: c for s, c in sai.items() if c}  # descarta 6 e 3 se ausentes
         X = pd.DataFrame({e: pd.to_numeric(df[c], errors="coerce") if c else 0.0 for e, c in ent.items()})
         Y = pd.DataFrame({s: pd.to_numeric(df[c], errors="coerce") for s, c in sai.items()})
         ok = X.notna().all(axis=1) & Y.notna().all(axis=1)
         X, Y = X[ok], Y[ok]
-        self.rf = RandomForestRegressor(n_estimators=150, random_state=0).fit(X.values, Y.values)
+        self.saidas = list(sai)
+        if self.tipo == "gp":
+            self.escala = StandardScaler().fit(X.values)
+            ker = ConstantKernel(1.0) * RBF([1.0] * X.shape[1], (1e-2, 1e2)) + WhiteKernel(1e-3, (1e-8, 1e-1))
+            self.rf = GaussianProcessRegressor(ker, normalize_y=True, n_restarts_optimizer=3, random_state=0)
+            self.rf.fit(self.escala.transform(X.values), Y.values)
+            rotulo = "Processo Gaussiano"
+        else:
+            self.rf = RandomForestRegressor(n_estimators=150, random_state=0).fit(X.values, Y.values)
+            rotulo = "RF"
         self.lo, self.hi = X.min().values, X.max().values
-        self.msg = f"RF treinado com {len(X)} experimentos (aba '{nome}')"
+        self.msg = f"{rotulo} treinado com {len(X)} experimentos (aba '{nome}'): " + ", ".join(
+            s.split()[-1] for s in self.saidas)
 
     def prever(self, massas_lote):
         """massas_lote: dict {CMC, Barita, Sal} em g/lote. Retorna (dict theta, fora_da_faixa)."""
@@ -62,7 +89,8 @@ class PredVisc:
         if rf is None:
             return None, {}
         x = np.array([[massas_lote.get(e, 0.0) for e in ENTRADAS]], dtype=float)
-        y = rf.predict(x)[0]
+        y = rf.predict(self.escala.transform(x) if self.escala is not None else x)[0]
+        y = np.clip(y, 0.0, None)  # leituras não são negativas
 
         # Identifica exatamente quais entradas estão fora do domínio experimental.
         # A comparação é feita na mesma unidade do treinamento: g por lote.
@@ -75,14 +103,14 @@ class PredVisc:
             for i, e in enumerate(ENTRADAS)
             if x[0, i] < self.lo[i] - 1e-9 or x[0, i] > self.hi[i] + 1e-9
         }
-        return dict(zip(SAIDAS, y)), fora
+        return dict(zip(self.saidas, y)), fora
 
 
 @st.cache_resource(show_spinner="Treinando Random Forest…")
-def carregar_modelo(dados, versao_cache="modelo-v2-2026-11-09"):
+def carregar_modelo(dados, tipo="rf", versao_cache="modelo-v3-2026-11-09"):
     # A versão faz parte da chave do cache: força a criação de uma instância
     # nova quando esta implementação do modelo for publicada.
-    return PredVisc(io.BytesIO(dados) if dados else None)
+    return PredVisc(io.BytesIO(dados) if dados else None, tipo)
 
 
 # =====================================================================
@@ -176,6 +204,12 @@ class Bateria:
         self.criar_valvula("T1 → T2", a.id, b.id, 0.2)
         self.criar_valvula("T2 → T3", b.id, c.id, 0.1)
 
+    def limpar_graficos(self):
+        """Zera o histórico de todos os tanques e recomeça o gráfico do estado atual."""
+        for t in self.tanques.values():
+            t.H = {k: [] for k in ["t", "vol", "dens", "sensor", "conc", "theta"]}
+            self._reg(t)
+
     def _reg(self, t):
         H, f = t.H, t.fluido
         H["t"].append(self.t)
@@ -234,8 +268,12 @@ class Bateria:
 # Estado
 # =====================================================================
 up = st.sidebar.file_uploader("Planilha de dados experimentais (.xlsx)", type="xlsx")
-pred = carregar_modelo(up.getvalue() if up else None)
-VERSAO_ESTADO = 2
+tipo_modelo = MODELOS[st.sidebar.selectbox(
+    "Modelo dos θ", list(MODELOS),
+    help="O Random Forest responde em degraus (a saída só muda ao cruzar um corte aprendido). "
+         "O Processo Gaussiano varia de forma contínua com a concentração.")]
+pred = carregar_modelo(up.getvalue() if up else None, tipo_modelo)
+VERSAO_ESTADO = 3
 if st.session_state.get("versao_estado") != VERSAO_ESTADO:
     # Objetos Bateria/Tanque salvos por versões antigas podem ter atributos incompatíveis.
     for _k in ("bat", "gen", "run", "csv"):
@@ -316,7 +354,7 @@ def card(t):
         unsafe_allow_html=True)
     th = t.H["theta"][-1] if t.H["theta"] else None
     if th:
-        st.caption(" · ".join(f"θ{s[-3:]} {th[s]:.1f}" for s in SAIDAS)
+        st.caption(" · ".join(f"θ{s.split()[-1]} {th[s]:.1f}" for s in SAIDAS if s in th)
                    + f"  |  VA {th['theta 600']/2:.1f} · VP {th['theta 600']-th['theta 300']:.1f}"
                    f" · LE {th['theta 300']-(th['theta 600']-th['theta 300']):.1f}")
         fora = t.fora if isinstance(t.fora, dict) else {}
@@ -394,10 +432,15 @@ def painel():
     tem_modelo_rf = getattr(pred, "rf", None) is not None
     ops = (
         ["Volume (L)", "Densidade real + sensor (g/mL)"]
-        + (SAIDAS if tem_modelo_rf else [])
+        + (list(pred.saidas) if tem_modelo_rf else [])
         + [f"Conc. {e} (g/L)" for e in bat.rhos]
     )
-    met = st.selectbox("Variável (eixo x = tempo global, passos)", ops)
+    sel, btn = st.columns([4, 1])
+    met = sel.selectbox("Variável (eixo x = tempo global, passos)", ops)
+    btn.write("")
+    btn.write("")
+    if btn.button("🧹 Limpar gráfico", help="Apaga o histórico plotado e recomeça do estado atual dos tanques."):
+        bat.limpar_graficos()
     if tanques:
         fig, ax = plt.subplots(figsize=(10, 3.8))
         for i, t in enumerate(tanques):
